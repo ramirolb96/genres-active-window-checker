@@ -22,8 +22,9 @@ SHEET_MASTER = "FY 26 ACTIVE"
 HEADER_ROW_MASTER = 3  # Row 4 in Excel
 MASTER_IDX_TITLE = 2   # Col C (Title)
 MASTER_IDX_GENRE = 11  # Col L (Main Genre) - 0-based index (A=0 ... L=11)
+MASTER_IDX_GENRE_2 = 12 # Col M (Second Genre) - Index 12
 
-# Windows Config (Same as previous script)
+# Windows Config
 MASTER_WINDOWS = [ (15, 16), (18, 19), (21, 22), (24, 25) ]
 
 # ==============================================================================
@@ -32,7 +33,7 @@ MASTER_WINDOWS = [ (15, 16), (18, 19), (21, 22), (24, 25) ]
 
 def clean_text(val):
     if pd.isna(val): return ""
-    return str(val).strip() # keeping case for Genre display, will upper for comparison if needed
+    return str(val).strip() 
 
 def parse_date(val):
     if pd.isna(val) or val == "" or str(val).strip().upper() == "EMPTY":
@@ -135,19 +136,32 @@ def get_user_dates():
 
 def get_user_genre(df_master):
     print("\n--- SELECT MAIN GENRE ---")
+    print("Scanning Master List for unique genres...")
     
-    # Extract unique genres from Col L (Index 11)
-    # Filter out NaNs/Empties
-    raw_genres = df_master.iloc[:, MASTER_IDX_GENRE].dropna().astype(str).unique()
+    unique_genres_set = set()
     
-    # Clean and sort
-    genres = sorted([g.strip() for g in raw_genres if g.strip() != ""])
+    # 1. Iterate through column L to build a clean set of individual genres
+    raw_column = df_master.iloc[:, MASTER_IDX_GENRE].dropna().astype(str)
+    
+    for val in raw_column:
+        # Normalize separators: Replace comma with semicolon
+        normalized_val = val.replace(",", ";")
+        # Split by semicolon
+        parts = normalized_val.split(";")
+        
+        for p in parts:
+            clean_p = p.strip()
+            if clean_p:
+                unique_genres_set.add(clean_p) 
+    
+    # 2. Sort list
+    genres = sorted(list(unique_genres_set))
     
     if not genres:
         print("No genres found in the Master List column L.")
         return None
 
-    # Display Options
+    # 3. Display Options
     for i, genre in enumerate(genres):
         print(f"{i + 1}) {genre}")
         
@@ -187,65 +201,124 @@ def run_genre_checker():
         print("Genre selection failed. Exiting.")
         return
 
-    print(f"\nSearching for '{selected_genre}' titles active from {format_date_str(user_start)} to {format_date_str(user_end)}...")
+    print(f"\nSearching for titles containing '{selected_genre}' active from {format_date_str(user_start)} to {format_date_str(user_end)}...")
 
-    matches = []
+    matches_active = []
+    matches_inactive = []
 
     # 2. Iterate and Filter
     for idx, row in df_master.iterrows():
-        # Check Genre First (Fastest check)
+        # A. Check Genre First
         if MASTER_IDX_GENRE >= len(row): continue
         
-        row_genre = clean_text(row.iloc[MASTER_IDX_GENRE])
-        if row_genre.upper() != selected_genre.upper():
+        raw_genre_str = clean_text(row.iloc[MASTER_IDX_GENRE])
+        if not raw_genre_str: continue
+
+        # Parse and clean row genres
+        row_genre_list = [x.strip().upper() for x in raw_genre_str.replace(",", ";").split(";")]
+        search_upper = selected_genre.upper()
+        
+        if search_upper not in row_genre_list:
             continue
+
+        # --- GET SECOND GENRE (Col M) ---
+        sec_genre_val = ""
+        if MASTER_IDX_GENRE_2 < len(row):
+             sec_genre_val = clean_text(row.iloc[MASTER_IDX_GENRE_2])
             
-        # Check Title
+        # --- CALCULATE SORT SCORE ---
+        match_index = row_genre_list.index(search_upper)
+        is_sole_genre = (len(row_genre_list) == 1)
+        
+        if is_sole_genre:
+            sort_score = 0
+        else:
+            sort_score = match_index + 1
+            
+        # B. Check Title
         if MASTER_IDX_TITLE >= len(row): continue
         title = row.iloc[MASTER_IDX_TITLE]
         if pd.isna(title): continue
         
-        # Check Dates
+        # C. Check Dates
         valid_blocks = get_all_valid_blocks(row)
         
         is_active_during_window = False
         supporting_block = None
         
         for v_start, v_end in valid_blocks:
-            # Logic: The USER window must be fully inside the VALID block
-            # i.e. Block Start <= User Start AND Block End >= User End
+            # Check if active window covers the FULL requested window
             if v_start <= user_start and v_end >= user_end:
                 is_active_during_window = True
                 supporting_block = (v_start, v_end)
                 break
         
+        # --- DATA PREP FOR ROWS ---
+        row_data = {
+            "Title": title,
+            "Main Genre": selected_genre,           # Col B
+            "Full Main Genre Values": raw_genre_str, # Col C
+            "Second Genre": sec_genre_val,          # Col D
+            "Requested Window Start": format_date_str(user_start),
+            "Requested Window End": format_date_str(user_end),
+            "Sort_Score": sort_score # Hidden helper column
+        }
+
         if is_active_during_window:
-            matches.append({
-                "Title": title,
-                "Main Genre": selected_genre,
-                "Requested Window Start": format_date_str(user_start),
-                "Requested Window End": format_date_str(user_end),
-                "Valid Master Window": f"{format_date_str(supporting_block[0])} to {format_date_str(supporting_block[1])}",
-                "Status": "ACTIVE"
-            })
+            # --- ACTIVE LOGIC ---
+            # Format: [12-04-2025] to [05-31-2026]
+            valid_str = f"[{format_date_str(supporting_block[0])}] to [{format_date_str(supporting_block[1])}]"
+            row_data["Valid Master Window"] = valid_str
+            row_data["Status"] = "ACTIVE"
+            matches_active.append(row_data)
+        else:
+            # --- INACTIVE LOGIC ---
+            if not valid_blocks:
+                valid_str = "NO VALID DATES"
+            else:
+                # List ALL blocks so user sees why it failed
+                # Format: [Start] to [End] OR [Start] to [End]
+                block_strs = [f"[{format_date_str(s)}] to [{format_date_str(e)}]" for s, e in valid_blocks]
+                valid_str = " OR ".join(block_strs)
+            
+            row_data["Valid Master Window"] = valid_str
+            row_data["Status"] = "INACTIVE"
+            matches_inactive.append(row_data)
 
     # 3. Output
-    if matches:
-        print(f"\nFound {len(matches)} matching titles.")
-        try:
-            with pd.ExcelWriter(PATH_OUTPUT, engine='openpyxl') as writer:
-                df_out = pd.DataFrame(matches)
-                df_out.to_excel(writer, index=False, sheet_name="Genre Report")
-                
-                print("Autofitting columns...")
-                autofit_columns(writer)
-                
-            print(f"Report saved successfully: {PATH_OUTPUT}")
-            os.startfile(PATH_OUTPUT)
-        except Exception as e:
-            print(f"Error saving report: {e}")
-    else:
-        print("\nNo titles found matching criteria.")
+    print(f"\nFound {len(matches_active)} ACTIVE titles.")
+    print(f"Found {len(matches_inactive)} INACTIVE titles.")
+    
+    try:
+        with pd.ExcelWriter(PATH_OUTPUT, engine='openpyxl') as writer:
+            
+            # --- TAB 1: ACTIVE TITLES ---
+            if matches_active:
+                matches_active.sort(key=lambda x: x["Sort_Score"])
+                df_active = pd.DataFrame(matches_active)
+                df_active.drop(columns=["Sort_Score"], inplace=True)
+                df_active.to_excel(writer, index=False, sheet_name="Active Titles")
+            else:
+                # Create empty sheet if no matches
+                pd.DataFrame(["No active titles found"]).to_excel(writer, sheet_name="Active Titles", header=False)
+
+            # --- TAB 2: INACTIVE TITLES ---
+            if matches_inactive:
+                matches_inactive.sort(key=lambda x: x["Sort_Score"])
+                df_inactive = pd.DataFrame(matches_inactive)
+                df_inactive.drop(columns=["Sort_Score"], inplace=True)
+                df_inactive.to_excel(writer, index=False, sheet_name="Inactive Titles")
+            else:
+                # Create empty sheet if no matches
+                pd.DataFrame(["No inactive titles found"]).to_excel(writer, sheet_name="Inactive Titles", header=False)
+            
+            print("Autofitting columns...")
+            autofit_columns(writer)
+            
+        print(f"Report saved successfully: {PATH_OUTPUT}")
+        os.startfile(PATH_OUTPUT)
+    except Exception as e:
+        print(f"Error saving report: {e}")
 
 if __name__ == "__main__":
     run_genre_checker()
