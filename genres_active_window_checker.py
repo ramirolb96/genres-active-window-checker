@@ -4,18 +4,65 @@ import shutil
 import tempfile
 import uuid
 import sys
+import tkinter as tk
+from tkinter import filedialog
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# --- CONFIGURATION ---
+# --- CONFIGURATION & SETUP ---
 # ==============================================================================
 
-# 1. FILE PATHS
-# Master List (Static)
-PATH_MASTER = r"C:\Users\RLozadaBillot\Sony Pictures Entertainment\Sony One Planning Strategy - Master List\Master List Amazon_Movies 2.0_fy26.xlsx"
+def find_desktop():
+    """
+    Tries to find the actual Desktop path, accounting for OneDrive syncs.
+    """
+    home = os.path.expanduser("~")
+    
+    # Priority list of paths to check
+    candidates = [
+        os.path.join(home, "OneDrive - Sony Pictures Entertainment", "Desktop"),
+        os.path.join(home, "OneDrive", "Desktop"),
+        os.path.join(home, "Desktop")
+    ]
+    
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+            
+    # Fallback: If no desktop found, save to the user's home folder
+    print("[WARNING] Could not find a Desktop folder. Saving to Home directory.")
+    return home
 
-# Output Path (Desktop)
-PATH_OUTPUT = r"C:\Users\RLozadaBillot\OneDrive - Sony Pictures Entertainment\Desktop\Genre_Active_Window_Report.xlsx"
+def select_master_file():
+    """Opens a file dialog for the user to select the Master List."""
+    print("Please select the Master List Excel file from the popup window...")
+    
+    # Initialize Tkinter and hide the main window
+    root = tk.Tk()
+    root.withdraw() 
+    root.attributes('-topmost', True) # Force the popup to the front
+    
+    file_path = filedialog.askopenfilename(
+        title="Select the Master List Excel File",
+        filetypes=[("Excel Files", "*.xlsx;*.xls")]
+    )
+    
+    root.destroy() # Close Tkinter
+    
+    if not file_path:
+        print("No file selected. Exiting.")
+        sys.exit()
+        
+    print(f"File selected: {os.path.basename(file_path)}")
+    return file_path
+
+# 1. FILE PATHS
+# Dynamic Selection (Pop-up window)
+PATH_MASTER = select_master_file()
+
+# Output Path (Smart Desktop Detection)
+DESKTOP_PATH = find_desktop()
+PATH_OUTPUT = os.path.join(DESKTOP_PATH, "Genre_Active_Window_Report.xlsx")
 
 # 2. MASTER LIST SETTINGS
 SHEET_MASTER = "FY 26 ACTIVE"
@@ -266,7 +313,6 @@ def run_genre_checker():
 
         if is_active_during_window:
             # --- ACTIVE LOGIC ---
-            # Format: [12-04-2025] to [05-31-2026]
             valid_str = f"[{format_date_str(supporting_block[0])}] to [{format_date_str(supporting_block[1])}]"
             row_data["Valid Master Window"] = valid_str
             row_data["Status"] = "ACTIVE"
@@ -276,8 +322,6 @@ def run_genre_checker():
             if not valid_blocks:
                 valid_str = "NO VALID DATES"
             else:
-                # List ALL blocks so user sees why it failed
-                # Format: [Start] to [End] OR [Start] to [End]
                 block_strs = [f"[{format_date_str(s)}] to [{format_date_str(e)}]" for s, e in valid_blocks]
                 valid_str = " OR ".join(block_strs)
             
@@ -288,6 +332,7 @@ def run_genre_checker():
     # 3. Output
     print(f"\nFound {len(matches_active)} ACTIVE titles.")
     print(f"Found {len(matches_inactive)} INACTIVE titles.")
+    print(f"Attempting to save to: {PATH_OUTPUT}")
     
     try:
         with pd.ExcelWriter(PATH_OUTPUT, engine='openpyxl') as writer:
@@ -299,7 +344,6 @@ def run_genre_checker():
                 df_active.drop(columns=["Sort_Score"], inplace=True)
                 df_active.to_excel(writer, index=False, sheet_name="Active Titles")
             else:
-                # Create empty sheet if no matches
                 pd.DataFrame(["No active titles found"]).to_excel(writer, sheet_name="Active Titles", header=False)
 
             # --- TAB 2: INACTIVE TITLES ---
@@ -309,7 +353,6 @@ def run_genre_checker():
                 df_inactive.drop(columns=["Sort_Score"], inplace=True)
                 df_inactive.to_excel(writer, index=False, sheet_name="Inactive Titles")
             else:
-                # Create empty sheet if no matches
                 pd.DataFrame(["No inactive titles found"]).to_excel(writer, sheet_name="Inactive Titles", header=False)
             
             print("Autofitting columns...")
